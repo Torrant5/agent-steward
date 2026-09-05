@@ -587,6 +587,35 @@ default to avoid starting the quota command on every tool call. Guard state
 is separated by session/turn and file-locked, so concurrent Codex sessions
 do not overwrite one another's counters.
 
+#### Acknowledging a budget stop (`guard ok`)
+
+A hard **rolling-24h** breach stops the turn at `UserPromptSubmit` so the
+human can decide. Two things make that stop easy to miss: the stop also
+swallows the prompt that carried it, and the Codex desktop app renders
+neither `stopReason` nor `systemMessage`. Until old samples age out of the
+24h window every further prompt would be dropped the same way. So:
+
+- **Every stop is made visible.** It is appended as one JSON line to
+  `<data dir>/blocks.log` (`event`, `kind`, `codes`, `reason`, session/turn
+  ids — never the prompt), and on macOS a desktop notification is posted via
+  `osascript` (`guard.block_notify_macos`, default `true`). Both are
+  best-effort and can never change the hook's decision.
+- **The user can resume with a bounded allowance.** A prompt that *starts
+  with* one of `guard.ack_phrases` (default `"guard ok"`, `"予算OK"`; matched
+  case-insensitively, full-width folded, as a plain prefix so
+  `予算OK続けて` works) is let through, the stop reason tells the user so,
+  and the agent receives an `additionalContext` note saying the prefix is a
+  control word and that it should stay frugal. The ack suppresses **only**
+  the `weekly_24h` finding, at all three events (prompt, tool call,
+  compaction), and only while its allowance lasts: `guard.ack_grant_pct`
+  (default `5.0`, measured as positive deltas since the ack, so a weekly
+  reset is not "spending") or `guard.ack_grant_hours` (default `3.0`),
+  whichever ends first. Then the guard stops again, reports why the previous
+  ack ended, and asks for a fresh one. Time / tool-count / repeat / per-turn
+  guards are never suppressed by an ack.
+
+`codex-guard status` shows the current ack and any finding it suppresses.
+
 #### `managed-run` — supervise a process this tool owns
 
 ```bash
@@ -661,8 +690,9 @@ Other safety properties:
 * No secrets or conversation bodies are stored or injected; only rules,
   memories (agent-authored, secret-scanned claims), evidence ids, counters,
   hashed fingerprints, and short-lived nonces. State is limited to counters,
-  **hashed** tool-call fingerprints, and weekly-usage percentages
-  (`data/guard-state.json`).
+  **hashed** tool-call fingerprints, weekly-usage percentages and the
+  current ack (`data/guard-state.json`); the block log (`data/blocks.log`)
+  records finding codes and reasons, never prompt text.
 * **Durable-memory capture is candidate-bound and additive-only.** Autonomous
   `exi memory resolve` can only append an observation or a distinct evidence
   source; it can never disable/alter/supersede/retire/delete an existing
@@ -833,6 +863,13 @@ wheel, or running from a checkout). Override any subset by creating a
 per-user `config.json`; it is deep-merged over the defaults. Keys:
 
 - `guard.*` — thresholds from the table in [`codex-guard`](#codex-guard--codex-budget-guard).
+- `guard.ack_phrases` (default `["guard ok", "予算OK"]`) /
+  `guard.ack_grant_pct` (default `5.0`) / `guard.ack_grant_hours` (default
+  `3.0`) — the user acknowledgement that resumes after a `weekly_24h` stop and
+  its allowance; `0` disables a bound, an empty phrase list disables acks.
+- `guard.block_log` (default `true`) — append every stop/deny to
+  `<data dir>/blocks.log`. `guard.block_notify_macos` (default `true`) —
+  post a macOS desktop notification on a stop (no-op elsewhere).
 - `quota.cmd` / `quota.timeout_seconds` / `quota.cache_seconds` — the quota
   adapter command (list of argv), its subprocess timeout, and cache TTL.
 - `managed_run.grace_seconds` / `managed_run.poll_seconds`.

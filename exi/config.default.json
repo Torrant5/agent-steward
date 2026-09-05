@@ -9,7 +9,12 @@
     "weekly_24h_hard_pct": 20.0,
     "tool_hard_count": 150,
     "fingerprint_repeat_max": 3,
-    "sample_retention_hours": 48
+    "sample_retention_hours": 48,
+    "ack_phrases": ["guard ok", "予算OK"],
+    "ack_grant_pct": 5.0,
+    "ack_grant_hours": 3.0,
+    "block_notify_macos": true,
+    "block_log": true
   },
   "quota": {
     "cmd": ["llm-quota", "--json", "--providers", "codex"],

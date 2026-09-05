@@ -191,5 +191,67 @@ class LockedStateConcurrencyTest(unittest.TestCase):
         self.assertEqual(state["turns"][key]["tool_count"], n_procs * n_each)
 
 
+ACK_CFG = {"guard": {**CFG["guard"], "ack_phrases": ["guard ok", "予算OK"], "ack_grant_pct": 5.0, "ack_grant_hours": 3.0}}
+
+
+class AckPureTest(unittest.TestCase):
+    def test_match_ack_prefix_only(self):
+        phrases = ACK_CFG["guard"]["ack_phrases"]
+        self.assertEqual(guard.match_ack("guard ok", phrases), "guard ok")
+        self.assertEqual(guard.match_ack("  Guard OK, continue", phrases), "guard ok")
+        self.assertEqual(guard.match_ack("予算OK続けて", phrases), "予算OK")
+        self.assertEqual(guard.match_ack("予算ＯＫ", phrases), "予算OK")  # full-width folded
+        self.assertIsNone(guard.match_ack("please guard ok", phrases))
+        self.assertIsNone(guard.match_ack("", phrases))
+        self.assertIsNone(guard.match_ack("guard ok", []))
+        self.assertIsNone(guard.match_ack("guard ok", ["", None, "   "]))
+
+    def test_ack_status_none_active_expired_spent(self):
+        st = {"turns": {}, "samples": []}
+        self.assertFalse(guard.ack_status(st, 100.0, ACK_CFG)["active"])
+        guard.grant_ack(st, 100.0, 30.0, "guard ok")
+        a = guard.ack_status(st, 200.0, ACK_CFG)
+        self.assertTrue(a["active"])
+        self.assertIn("remaining +5.0% weekly", a["reason"])
+        # time expiry
+        self.assertFalse(guard.ack_status(st, 100.0 + 3 * 3600, ACK_CFG)["active"])
+        # pct expiry: +5 since ack (reset-safe: a drop in between is ignored)
+        st["samples"] = [
+            {"ts": 100.0, "used": 30.0},
+            {"ts": 150.0, "used": 33.0},
+            {"ts": 160.0, "used": 1.0},   # weekly reset
+            {"ts": 170.0, "used": 3.0},
+        ]
+        self.assertFalse(guard.ack_status(st, 200.0, ACK_CFG)["active"])
+        self.assertIn("ack spent", guard.ack_status(st, 200.0, ACK_CFG)["reason"])
+        # samples before the ack do not count
+        st["samples"] = [{"ts": 10.0, "used": 0.0}, {"ts": 90.0, "used": 30.0}, {"ts": 150.0, "used": 31.0}]
+        self.assertTrue(guard.ack_status(st, 200.0, ACK_CFG)["active"])
+
+    def test_ack_status_ignores_zero_or_missing_bounds(self):
+        st = {"turns": {}, "samples": [{"ts": 100.0, "used": 0.0}, {"ts": 150.0, "used": 90.0}]}
+        guard.grant_ack(st, 100.0, 0.0, "guard ok")
+        cfg = {"guard": {"ack_grant_pct": 0, "ack_grant_hours": 0}}
+        a = guard.ack_status(st, 100.0 + 100 * 3600, cfg)
+        self.assertTrue(a["active"])
+        self.assertIn("unbounded", a["reason"])
+
+    def test_apply_ack_only_suppresses_weekly_24h(self):
+        findings = guard.evaluate(CFG, ctx(h24_pct=25.0, elapsed_minutes=130, max_fingerprint=3))
+        kept, suppressed = guard.apply_ack(findings, {"active": True})
+        self.assertEqual([f["code"] for f in suppressed], ["weekly_24h"])
+        self.assertEqual(sorted(f["code"] for f in kept), ["repeat", "turn_time"])
+        kept2, suppressed2 = guard.apply_ack(findings, {"active": False})
+        self.assertEqual(kept2, findings)
+        self.assertEqual(suppressed2, [])
+
+    def test_ack_hint_lists_phrases_and_bounds(self):
+        hint = guard.ack_hint(ACK_CFG)
+        self.assertIn('"guard ok" or "予算OK"', hint)
+        self.assertIn("+5% weekly", hint)
+        self.assertIn("3h", hint)
+        self.assertEqual(guard.ack_hint({"guard": {"ack_phrases": []}}), "")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -203,6 +203,107 @@ def compute_context(state: dict, turn_key: str, now: float, cfg: dict) -> dict:
     }
 
 
+# ---- user acknowledgement of a budget stop ---------------------------------
+# A HARD `weekly_24h` stop is meant to hand control back to the human. But the
+# UserPromptSubmit stop also swallows the human's *answer*, and the Codex
+# desktop app shows neither stopReason nor systemMessage, so without an escape
+# hatch the guard is a silent dead end until old samples age out of the 24h
+# window. The escape hatch: a prompt that *starts with* one of
+# `guard.ack_phrases` grants a bounded allowance — `ack_grant_pct` more weekly
+# usage (measured as positive deltas since the ack, reset-safe like everything
+# else) or `ack_grant_hours`, whichever runs out first. Only the `weekly_24h`
+# finding is suppressed; time / tool-count / repeat / per-turn guards are
+# untouched. When the allowance is spent the guard stops again and asks for a
+# fresh ack.
+ACK_CODE = "weekly_24h"
+
+
+def _normalize_ack_text(s: str) -> str:
+    # casefold + collapse whitespace; also fold full-width ASCII so "ＯＫ" == "ok"
+    s = "".join(chr(ord(c) - 0xFEE0) if 0xFF01 <= ord(c) <= 0xFF5E else c for c in s)
+    return " ".join(s.casefold().split())
+
+
+def match_ack(prompt: str, phrases) -> str | None:
+    """Return the matched ack phrase when `prompt` starts with one, else None."""
+    if not prompt or not phrases:
+        return None
+    text = _normalize_ack_text(prompt)
+    for phrase in phrases:
+        if not isinstance(phrase, str) or not phrase.strip():
+            continue
+        p = _normalize_ack_text(phrase)
+        # plain prefix match: Japanese has no word boundary to key on
+        # ("予算OK続けて"), so "guard ok" also accepts "guard ok, go on".
+        if p and text.startswith(p):
+            return phrase
+    return None
+
+
+def grant_ack(state: dict, now: float, weekly_used, phrase: str) -> dict:
+    ack = {
+        "ts": now,
+        "phrase": phrase,
+        "used_at_ack": (None if weekly_used is None else float(weekly_used)),
+    }
+    state["ack"] = ack
+    return ack
+
+
+def ack_status(state: dict, now: float, cfg: dict) -> dict:
+    """Describe the current ack: {"active": bool, "reason": str, ...details}."""
+    g = cfg["guard"]
+    ack = state.get("ack")
+    if not isinstance(ack, dict) or ack.get("ts") is None:
+        return {"active": False, "reason": "no ack on record"}
+    grant_pct = float(g.get("ack_grant_pct", 0.0) or 0.0)
+    grant_hours = float(g.get("ack_grant_hours", 0.0) or 0.0)
+    elapsed_h = max(0.0, (now - float(ack["ts"])) / 3600.0)
+    inc, _ = weekly_increment(state.get("samples", []), float(ack["ts"]), now)
+    used_since = 0.0 if inc is None else inc
+    details = {
+        "ack_ts": ack["ts"],
+        "elapsed_hours": elapsed_h,
+        "used_since_ack_pct": used_since,
+        "grant_pct": grant_pct,
+        "grant_hours": grant_hours,
+    }
+    if grant_hours > 0 and elapsed_h >= grant_hours:
+        return {"active": False, "reason": f"ack expired: {elapsed_h:.1f}h elapsed >= {grant_hours:g}h", **details}
+    if grant_pct > 0 and used_since >= grant_pct:
+        return {"active": False, "reason": f"ack spent: +{used_since:.1f}% weekly since ack >= {grant_pct:g}%", **details}
+    remaining_pct = None if grant_pct <= 0 else max(0.0, grant_pct - used_since)
+    remaining_h = None if grant_hours <= 0 else max(0.0, grant_hours - elapsed_h)
+    parts = []
+    if remaining_pct is not None:
+        parts.append(f"+{remaining_pct:.1f}% weekly")
+    if remaining_h is not None:
+        parts.append(f"{remaining_h:.1f}h")
+    return {"active": True, "reason": "ack active; remaining " + (" / ".join(parts) or "unbounded"), **details}
+
+
+def apply_ack(findings: list, ack: dict):
+    """Drop `weekly_24h` findings while an ack is active. Returns (kept, suppressed)."""
+    if not ack.get("active"):
+        return findings, []
+    kept = [f for f in findings if f["code"] != ACK_CODE]
+    suppressed = [f for f in findings if f["code"] == ACK_CODE]
+    return kept, suppressed
+
+
+def ack_hint(cfg: dict) -> str:
+    g = cfg["guard"]
+    phrases = [p for p in g.get("ack_phrases", []) if isinstance(p, str) and p.strip()]
+    if not phrases:
+        return ""
+    quoted = " or ".join(f'"{p}"' for p in phrases)
+    return (
+        f"To resume, send a prompt that starts with {quoted} "
+        f"(grants +{float(g.get('ack_grant_pct', 0)):g}% weekly usage or "
+        f"{float(g.get('ack_grant_hours', 0)):g}h, whichever ends first)."
+    )
+
+
 # ---- pure evaluation -------------------------------------------------------
 def evaluate(cfg: dict, ctx: dict) -> list:
     """Return a list of findings: {level, code, message}. HARD => should deny."""

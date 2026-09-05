@@ -48,11 +48,15 @@ def cmd_status(args) -> int:
     # Show the most recently started turn across all sessions (best-effort summary).
     tkey = max(turns, key=lambda k: turns[k].get("started_at") or -1) if turns else ""
     ctx = guard.compute_context(state, tkey, now, cfg)
-    findings = guard.evaluate(cfg, ctx)
+    raw_findings = guard.evaluate(cfg, ctx)
+    ack = guard.ack_status(state, now, cfg)
+    findings, suppressed = guard.apply_ack(raw_findings, ack)
     report = {
         "quota": {"weekly_used": q.weekly_used, "ok": q.ok, "reason": q.reason, "mode": q.mode, "resets_at": q.resets_at},
         "context": ctx,
         "findings": findings,
+        "suppressed_by_ack": suppressed,
+        "ack": ack,
         "level": guard.worst_level(findings),
         "thresholds": cfg["guard"],
     }
@@ -62,9 +66,12 @@ def cmd_status(args) -> int:
     print(f"quota: weekly_used={q.weekly_used} ok={q.ok} mode={q.mode} reason={q.reason or '-'}")
     print(f"turn: elapsed_min={ctx['elapsed_minutes']} tools={ctx['tool_count']} "
           f"max_repeat={ctx['max_fingerprint']} turn_pct={ctx['turn_pct']} h24_pct={ctx['h24_pct']}")
+    print(f"ack: {ack['reason']}")
     print(f"level: {guard.worst_level(findings) or 'ok'}")
     for f in findings:
         print(f"  [{f['level']}] {f['code']}: {f['message']}")
+    for f in suppressed:
+        print(f"  [suppressed by ack] {f['code']}: {f['message']}")
     return 0
 
 
