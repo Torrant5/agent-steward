@@ -70,7 +70,8 @@ def parse_quota(data: dict) -> QuotaResult:
     if not codex:
         return QuotaResult(None, None, None, False, "no codex provider in llm-quota output", data)
     if not codex.get("ok", False):
-        return QuotaResult(None, None, codex.get("mode"), False, "codex provider not ok (main pool unresolved)", data)
+        return QuotaResult(None, None, codex.get("mode"), False,
+                           codex.get("error") or "codex provider not ok (main pool unresolved)", data)
     windows = codex.get("windows") or {}
     weekly = windows.get("weekly")
     if not weekly or weekly.get("used_percent") is None:

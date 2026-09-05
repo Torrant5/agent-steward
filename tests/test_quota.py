@@ -43,6 +43,14 @@ class QuotaParseTest(unittest.TestCase):
         self.assertIsNone(q.weekly_used)
         self.assertIn("weekly", q.reason)
 
+    def test_stale_provider_preserves_reason(self):
+        data = make(ok=False, mode="unknown")
+        data["providers"]["codex"]["error"] = "Codex quota sample is stale (1800s > 900s)"
+        q = parse_quota(data)
+        self.assertFalse(q.ok)
+        self.assertIsNone(q.weekly_used)
+        self.assertEqual(q.reason, data["providers"]["codex"]["error"])
+
     def test_non_object_root_is_unknown(self):
         q = parse_quota([])
         self.assertFalse(q.ok)
