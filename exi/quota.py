@@ -53,12 +53,21 @@ def read_codex_quota(cfg: dict) -> QuotaResult:
     except Exception as e:  # pragma: no cover - defensive
         return QuotaResult(None, None, None, False, f"llm-quota error: {e}")
 
-    if proc.returncode != 0:
-        return QuotaResult(None, None, None, False, f"llm-quota exit {proc.returncode}: {proc.stderr.strip()[:200]}")
+    exit_reason = f"llm-quota exit {proc.returncode}: {proc.stderr.strip()[:200]}"
     try:
         data = json.loads(proc.stdout)
     except json.JSONDecodeError as e:
+        if proc.returncode != 0:
+            return QuotaResult(None, None, None, False, exit_reason)
         return QuotaResult(None, None, None, False, f"llm-quota bad JSON: {e}")
+    if proc.returncode != 0:
+        # llm-quota exits non-zero when the provider is not ok but still prints
+        # its JSON report; prefer the provider's own error text (e.g. "sample is
+        # stale") over a bare exit code. Never trust an "ok" result on a failed run.
+        parsed = parse_quota(data) if isinstance(data, dict) else None
+        if parsed is not None and not parsed.ok and parsed.reason:
+            return parsed
+        return QuotaResult(None, None, None, False, exit_reason)
     return parse_quota(data)
 
 

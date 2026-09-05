@@ -9,7 +9,7 @@ from unittest import mock
 import conftest_paths  # noqa: F401
 
 from exi import guard
-from exi.quota import parse_quota, read_codex_quota_cached
+from exi.quota import parse_quota, read_codex_quota, read_codex_quota_cached
 
 
 def make(used=31.0, ok=True, weekly=True, mode="normal"):
@@ -150,6 +150,41 @@ class QuotaCacheTest(unittest.TestCase):
         inc, n = guard.weekly_increment(samples, 0, now)
         self.assertEqual(inc, 0.0)
         self.assertEqual(n, 5)
+
+
+class QuotaExitCodeTest(unittest.TestCase):
+    """A non-zero llm-quota exit still carries the provider's own error text."""
+
+    CFG = {"quota": {"cmd": ["llm-quota-stub"], "timeout_seconds": 1, "cache_seconds": 0}}
+
+    def _run_with(self, rc, stdout, stderr=""):
+        fake = lambda cmd, *a, **k: subprocess.CompletedProcess(cmd, rc, stdout=stdout, stderr=stderr)  # noqa: E731
+        with mock.patch("exi.quota.subprocess.run", side_effect=fake):
+            return read_codex_quota(self.CFG)
+
+    def test_nonzero_exit_with_json_prefers_provider_error(self):
+        data = make(ok=False, mode="unknown")
+        data["providers"]["codex"]["error"] = "Codex quota sample is stale (1207s > 900s)"
+        q = self._run_with(1, json.dumps(data), stderr="")
+        self.assertFalse(q.ok)
+        self.assertIsNone(q.weekly_used)
+        self.assertEqual(q.reason, "Codex quota sample is stale (1207s > 900s)")
+
+    def test_nonzero_exit_without_json_reports_exit_and_stderr(self):
+        q = self._run_with(2, "", stderr="usage: llm-quota ...")
+        self.assertFalse(q.ok)
+        self.assertTrue(q.reason.startswith("llm-quota exit 2: usage"))
+
+    def test_nonzero_exit_never_yields_ok(self):
+        q = self._run_with(1, json.dumps(make(ok=True)), stderr="boom")
+        self.assertFalse(q.ok)
+        self.assertIsNone(q.weekly_used)
+        self.assertIn("llm-quota exit 1", q.reason)
+
+    def test_zero_exit_unchanged(self):
+        q = self._run_with(0, json.dumps(make(ok=True)))
+        self.assertTrue(q.ok)
+        self.assertEqual(q.weekly_used, 31.0)
 
 
 if __name__ == "__main__":
